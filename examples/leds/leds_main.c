@@ -189,7 +189,6 @@ static int led_daemon(int argc, char *argv[])
         }
 
       ledset = newset;
-      printf("led_daemon: LED set 0x%02x\n", (unsigned int)ledset);
 
       ret = ioctl(fd, ULEDIOC_SETALL, ledset);
       if (ret < 0)
@@ -207,9 +206,14 @@ static int led_daemon(int argc, char *argv[])
    * task terminated by a SIGTERM
    */
 
+  ledset = 0;
+  ioctl(fd, ULEDIOC_SETALL, ledset);
+  close(fd);
   exit(EXIT_SUCCESS);
 
 errout_with_fd:
+  ledset = 0;
+  ioctl(fd, ULEDIOC_SETALL, ledset);
   close(fd);
 
 errout:
