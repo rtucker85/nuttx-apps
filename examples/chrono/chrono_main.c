@@ -49,7 +49,7 @@
 #define BUTTON_PRIORITY 100
 #define BUTTON_DEVPATH "/dev/buttons"
 
-#define SLCD_DEVNAME "/dev/slcd0"
+#define SLCD_DEVNAME "/dev/lcd1602"
 #define SLCD_BUFSIZE 8
 
 /****************************************************************************
@@ -304,6 +304,8 @@ int main(int argc, FAR char *argv[])
   long sec;
   long min;
 
+  unsigned long brightness;
+
   /* Create a thread to wait for the button events */
 
   ret = task_create("chrono_daemon", BUTTON_PRIORITY,
@@ -368,6 +370,11 @@ int main(int argc, FAR char *argv[])
       printf("Clear screen\n");
       slcd_encode(SLCDCODE_CLEAR, 0, &priv->stream);
       slcd_flush(&priv->stream);
+
+      brightness = ((unsigned long)priv->attr.maxbrightness + 1) >> 1;
+      printf("Set brightness to %lu\n", brightness);
+
+      ret = ioctl(fd, SLCDIOC_SETBRIGHTNESS, brightness);
 
       priv->initialized = true;
     }
@@ -441,7 +448,7 @@ int main(int argc, FAR char *argv[])
           slcd_flush(&priv->stream);
         }
 
-      /* usleep(1000); */
+      usleep(1000);
     }
 
   /* Normal exit */
