@@ -52,7 +52,7 @@ int main(int argc, FAR char *argv[])
   int fd;
   int i;
 
-  meta = ORB_ID(sensor_accel_uncal);
+  meta = ORB_ID(sensor_accel);
   fd = orb_subscribe_multi(meta, 0);
   if (fd < 0)
     {
@@ -63,7 +63,8 @@ int main(int argc, FAR char *argv[])
   fds.fd     = fd;
   fds.events = POLLIN;
 
-  for (i = 0; i < READ_TIMES; i++)
+  //for (i = 0; i < READ_TIMES; i++)
+  while(1)
     {
       if (poll(&fds, 1, ACC_TIMEOUT) > 0)
         {
@@ -81,7 +82,7 @@ int main(int argc, FAR char *argv[])
       else if (errno != EINTR)
         {
           printf("Waited for %d milliseconds without a message. "
-                 "Giving up. err:%d", ACC_TIMEOUT, errno);
+                 "Giving up. err: %d", ACC_TIMEOUT, errno);
           break;
         }
     }

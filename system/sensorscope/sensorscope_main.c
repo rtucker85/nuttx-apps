@@ -26,6 +26,8 @@
 
 #include <nuttx/config.h>
 
+#include <nuttx/list.h>
+
 #include <sys/boardctl.h>
 #include <sys/param.h>
 

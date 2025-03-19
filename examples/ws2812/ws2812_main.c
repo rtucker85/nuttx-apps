@@ -303,6 +303,9 @@ int main(int argc, FAR char *argv[])
         }
     }
 
+  memset(buffer, 0, 4 * config.leds);
+  (void)write(fd, buffer, 4 * config.leds);
+
   free(buffer);
   close(fd);
   fflush(stdout);

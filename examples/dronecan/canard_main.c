@@ -500,7 +500,7 @@ static int canard_daemon(int argc, char *argv[])
 
   /* Open the CAN device for reading */
 
-  
+
 #ifdef CONFIG_NET_CAN
   const char * const can_iface_name = "can0";
 

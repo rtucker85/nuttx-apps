@@ -102,7 +102,9 @@ int main(int argc, FAR char *argv[])
 
   config.temp_os = BME680_OS_2X;
   config.press_os = BME680_OS_16X;
+#ifdef CONFIG_BME680_ENABLE_IIR_FILTER
   config.filter_coef = BME680_FILTER_COEF3;
+#endif
   config.hum_os = BME680_OS_1X;
 
   /* Set heater parameters */
