@@ -27,54 +27,54 @@
 #include <poll.h>
 #include <errno.h>
 #include <sensor/accel.h>
+#include <sensor/gyro.h>
 
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
 
 #define ACC_TIMEOUT      1000
-#define READ_TIMES       100
 
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
 
-/****************************************************************************
+/***************************************************************************  *
  * sixaxis_main
  ****************************************************************************/
 
 int main(int argc, FAR char *argv[])
 {
-  FAR const struct orb_metadata *meta;
+  FAR const struct orb_metadata *accel_meta;
   struct sensor_accel accel_data;
   struct pollfd fds;
   int ret = OK;
   int fd;
-  int i;
 
-  meta = ORB_ID(sensor_accel);
-  fd = orb_subscribe_multi(meta, 0);
+  accel_meta = ORB_ID(sensor_accel);
+  fd = orb_subscribe_multi(accel_meta, 0);
   if (fd < 0)
     {
       printf("sensor accel subscribe error! return:%d\n", fd);
       return fd;
     }
 
+  orb_set_frequency(fd, 100);
+
   fds.fd     = fd;
   fds.events = POLLIN;
 
-  //for (i = 0; i < READ_TIMES; i++)
   while(1)
     {
       if (poll(&fds, 1, ACC_TIMEOUT) > 0)
         {
           if (fds.revents & POLLIN)
             {
-              ret = orb_copy(meta, fd, &accel_data);
+              ret = orb_copy(accel_meta, fd, &accel_data);
 #ifdef CONFIG_DEBUG_UORB
-              if (ret == OK && meta->o_format != NULL)
+              if (ret == OK && accel_meta->o_format != NULL)
                 {
-                  orb_info(meta->o_format, meta->o_name, &accel_data);
+                  orb_info(accel_meta->o_format, accel_meta->o_name, &accel_data);
                 }
 #endif
             }
@@ -82,7 +82,7 @@ int main(int argc, FAR char *argv[])
       else if (errno != EINTR)
         {
           printf("Waited for %d milliseconds without a message. "
-                 "Giving up. err: %d", ACC_TIMEOUT, errno);
+                 "Giving up. err: %d\n", ACC_TIMEOUT, errno);
           break;
         }
     }

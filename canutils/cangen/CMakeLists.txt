@@ -1,5 +1,5 @@
 # ##############################################################################
-# apps/canutils/cansend/CMakeLists.txt
+# apps/canutils/cangen/CMakeLists.txt
 #
 # Licensed to the Apache Software Foundation (ASF) under one or more contributor
 # license agreements.  See the NOTICE file distributed with this work for
@@ -18,19 +18,19 @@
 #
 # ##############################################################################
 
-if(CONFIG_CANUTILS_CANSEND)
+if(CONFIG_CANUTILS_CANGEN)
 
   set(LIBCANUTILS_DIR ${NUTTX_APPS_DIR}/canutils/libcanutils)
 
   nuttx_add_application(
     NAME
-    cansend
+    cangen
     STACKSIZE
-    ${CONFIG_CANUTILS_CANSEND_STACKSIZE}
+    ${CONFIG_CANUTILS_CANGEN_STACKSIZE}
     MODULE
-    ${CONFIG_CANUTILS_CANSEND}
+    ${CONFIG_CANUTILS_CANGEN}
     SRCS
-    cansend.c
+    cangen.c
     INCLUDE_DIRECTORIES
     ${LIBCANUTILS_DIR})
 

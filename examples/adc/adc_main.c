@@ -41,6 +41,7 @@
 #include <nuttx/analog/ioctl.h>
 
 #include "adc.h"
+#include <nuttx/analog/ads131.h>
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -277,6 +278,7 @@ int main(int argc, FAR char *argv[])
         }
 #endif
 
+#if 0
       /* Read up to CONFIG_EXAMPLES_ADC_GROUPSIZE samples */
 
       readsize = CONFIG_EXAMPLES_ADC_GROUPSIZE * sizeof(struct adc_msg_s);
@@ -328,6 +330,39 @@ int main(int argc, FAR char *argv[])
         {
           break;
         }
+#endif
+
+#if 0
+      ret = ioctl(fd, ANIOC_TRIGGER, 0);
+      if (ret < 0)
+        {
+          int errcode = errno;
+          printf("adc_main: ANIOC_TRIGGER ioctl failed: %d\n", errcode);
+        }
+#endif
+      int32_t tmp[2];
+      ret = ioctl(fd, ANIOC_ADS131_READ_CHANNELS, tmp);
+      if (ret < 0)
+        {
+          int errcode = errno;
+          printf("adc_main: ANIOC_ADS131_READ_CHANNELS ioctl failed: %d\n", errcode);
+        }
+
+      float temp[2];
+
+      temp[0] = (2.4 * tmp[0]) / 16777215;
+      temp[0] *= 1000;
+      temp[0] *= 1000;
+      temp[0] /= 40; // 40uV per deg C
+
+      temp[1] = (2.4 * tmp[1]) / 16777215;
+      temp[1] *= 1000;
+      temp[1] *= 1000;
+      temp[1] /= 40; // 40uV per deg C
+
+      printf("ch[0]: %04.2f °C\tch[1]: %04.2f °C\n", temp[0], temp[1]);
+
+      usleep(10 * 1000);
     }
 
   close(fd);

@@ -1,5 +1,5 @@
 ############################################################################
-# apps/canutils/candump/Makefile
+# apps/canutils/cangen/Makefile
 #
 # Licensed to the Apache Software Foundation (ASF) under one or more
 # contributor license agreements.  See the NOTICE file distributed with
@@ -20,15 +20,15 @@
 
 include $(APPDIR)/Make.defs
 
-# SocketCAN userspace utilities and tools candump tool
-# https://github.com/linux-can/can-utils/blob/master/candump.c
+# SocketCAN userspace utilities and tools cangen tool
+# https://github.com/linux-can/can-utils/blob/master/cangen.c
 
-PROGNAME = candump
+PROGNAME = cangen
 PRIORITY = SCHED_PRIORITY_DEFAULT
-STACKSIZE = $(CONFIG_CANUTILS_CANDUMP_STACKSIZE)
-MODULE = $(CONFIG_CANUTILS_CANDUMP)
+STACKSIZE = $(CONFIG_CANUTILS_CANGEN_STACKSIZE)
+MODULE = $(CONFIG_CANUTILS_CANGEN)
 
 CFLAGS += ${INCDIR_PREFIX}$(APPDIR)/canutils/libcanutils
-MAINSRC = candump.c
+MAINSRC = cangen.c
 
 include $(APPDIR)/Application.mk

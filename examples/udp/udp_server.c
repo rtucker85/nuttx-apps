@@ -203,6 +203,7 @@ void udp_server(void)
           exit(-1);
         }
 
+      printf("%s\n", inbuf);
       if (!check_buffer(inbuf))
         {
           printf("server: %d. Bad buffer contents\n", offset);

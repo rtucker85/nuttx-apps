@@ -1,8 +1,9 @@
-/****************************************************************************
- * apps/canutils/candump/candump.c
+/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause) */
+/*
+ * candump.c
  *
- * SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
- * SPDX-FileCopyrightText: 2002-2007 Volkswagen Group Electronic Research
+ * Copyright (c) 2002-2009 Volkswagen Group Electronic Research
+ * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -39,94 +40,97 @@
  *
  * Send feedback to <linux-can@vger.kernel.org>
  *
- ****************************************************************************/
+ */
 
-/****************************************************************************
- * Included Files
- ****************************************************************************/
-
+#include <ctype.h>
+#include <errno.h>
+#include <libgen.h>
+#include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
-#include <inttypes.h>
-#include <unistd.h>
 #include <string.h>
-#include <signal.h>
-#include <ctype.h>
-#include <libgen.h>
 #include <time.h>
-#include <errno.h>
+#include <unistd.h>
 
+#include <net/if.h>
+#include <sys/epoll.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/ioctl.h>
 #include <sys/uio.h>
-#include <net/if.h>
 
 #include <nuttx/can.h>
+#include <netpacket/can.h>
 
 #include "terminal.h"
 #include "lib.h"
 
-/****************************************************************************
- * Pre-processor Definitions
- ****************************************************************************/
+#define DEBUG
 
 /* for hardware timestamps - since Linux 2.6.30 */
 #ifndef SO_TIMESTAMPING
 #define SO_TIMESTAMPING 37
 #endif
 
+#define TIMESTAMPSZ 50 /* string 'absolute with date' requires max 49 bytes */
+
 /* from #include <linux/net_tstamp.h> - since Linux 2.6.30 */
 #define SOF_TIMESTAMPING_SOFTWARE (1<<4)
 #define SOF_TIMESTAMPING_RX_SOFTWARE (1<<3)
 #define SOF_TIMESTAMPING_RAW_HARDWARE (1<<6)
 
-#define MAXSOCK 16    /* max. number of CAN interfaces given on the cmdline */
+#define MAXSOCK 16 /* max. number of CAN interfaces given on the cmdline */
 #define MAXIFNAMES 30 /* size of receive name index to omit ioctls */
-#define MAXCOL 6      /* number of different colors for colorized output */
-#define ANYDEV "any"  /* name of interface to receive from any CAN interface */
-#define ANL "\r\n"    /* newline in ASC mode */
+#define MAXCOL 6 /* number of different colors for colorized output */
+#define ANYDEV "any" /* name of interface to receive from any CAN interface */
+#define ANL "\r\n" /* newline in ASC mode */
 
 #define SILENT_INI 42 /* detect user setting on commandline */
-#define SILENT_OFF 0  /* no silent mode */
-#define SILENT_ANI 1  /* silent mode with animation */
-#define SILENT_ON  2  /* silent mode (completely silent) */
+#define SILENT_OFF 0 /* no silent mode */
+#define SILENT_ANI 1 /* silent mode with animation */
+#define SILENT_ON 2 /* silent mode (completely silent) */
 
-#define BOLD    ATTBOLD
-#define RED     ATTBOLD FGRED
-#define GREEN   ATTBOLD FGGREEN
-#define YELLOW  ATTBOLD FGYELLOW
-#define BLUE    ATTBOLD FGBLUE
-#define MAGENTA ATTBOLD FGMAGENTA
-#define CYAN    ATTBOLD FGCYAN
+#define BOLD ATTBOLD
+#define RED (ATTBOLD FGRED)
+#define GREEN (ATTBOLD FGGREEN)
+#define YELLOW (ATTBOLD FGYELLOW)
+#define BLUE (ATTBOLD FGBLUE)
+#define MAGENTA (ATTBOLD FGMAGENTA)
+#define CYAN (ATTBOLD FGCYAN)
 
-const char col_on [MAXCOL][19] = {BLUE, RED, GREEN, BOLD, MAGENTA, CYAN};
-const char col_off [] = ATTRESET;
+static const char col_on[MAXCOL][19] = { BLUE, RED, GREEN, BOLD, MAGENTA, CYAN };
+static const char col_off[] = ATTRESET;
 
-/****************************************************************************
- * Public Functions
- ****************************************************************************/
+struct if_info { /* bundled information per open socket */
+	int s; /* socket */
+	char *cmdlinename;
+	__u32 dropcnt;
+	__u32 last_dropcnt;
+};
+static struct if_info sock_info[MAXSOCK];
 
-static __u32 dropcnt[MAXSOCK];
-static __u32 last_dropcnt[MAXSOCK];
-static char devname[MAXIFNAMES][IFNAMSIZ+1];
-static int  dindex[MAXIFNAMES];
-static int  max_devname_len; /* to prevent frazzled device name output */
-const int canfd_on = 1;
+static char *progname;
+static char devname[MAXIFNAMES][IFNAMSIZ + 1];
+static int dindex[MAXIFNAMES];
+static int max_devname_len; /* to prevent frazzled device name output */
+static const int canfx_on = 1;
 
 #define MAXANI 4
-const char anichar[MAXANI] = {'|', '/', '-', '\\'};
-const char extra_m_info[4][4] = {"- -", "B -", "- E", "B E"};
+static const char anichar[MAXANI] = { '|', '/', '-', '\\' };
+static const char extra_m_info[4][4] = { "- -", "B -", "- E", "B E" };
+
+//extern int optind, opterr, optopt;
 
 static volatile int running = 1;
+static volatile sig_atomic_t signal_num;
 
-static void print_usage(char *prg)
+static void print_usage(void)
 {
-	fprintf(stderr, "%s - dump CAN bus traffic.\n", prg);
-	fprintf(stderr, "\nUsage: %s [options] <CAN interface>+\n", prg);
-	fprintf(stderr, "  (use CTRL-C to terminate %s)\n\n", prg);
+	fprintf(stderr, "%s - dump CAN bus traffic.\n", progname);
+	fprintf(stderr, "\nUsage: %s [options] <CAN interface>+\n", progname);
+	fprintf(stderr, "  (use CTRL-C to terminate %s)\n\n", progname);
 	fprintf(stderr, "Options:\n");
 	fprintf(stderr, "         -t <type>   (timestamp: (a)bsolute/(d)elta/(z)ero/(A)bsolute w date)\n");
 	fprintf(stderr, "         -H          (read hardware timestamps instead of system timestamps)\n");
@@ -136,14 +140,16 @@ static void print_usage(char *prg)
 	fprintf(stderr, "         -S          (swap byte order in printed CAN data[] - marked with '%c' )\n", SWAP_DELIMITER);
 	fprintf(stderr, "         -s <level>  (silent mode - %d: off (default) %d: animation %d: silent)\n", SILENT_OFF, SILENT_ANI, SILENT_ON);
 	fprintf(stderr, "         -l          (log CAN-frames into file. Sets '-s %d' by default)\n", SILENT_ON);
+	fprintf(stderr, "         -f <fname>  (log CAN-frames into file <fname>. Sets '-s %d' by default)\n", SILENT_ON);
 	fprintf(stderr, "         -L          (use log file format on stdout)\n");
 	fprintf(stderr, "         -n <count>  (terminate after reception of <count> CAN frames)\n");
 	fprintf(stderr, "         -r <size>   (set socket receive buffer to <size>)\n");
-	fprintf(stderr, "         -D          (Don't exit if a \"detected\" can device goes down.\n");
+	fprintf(stderr, "         -D          (Don't exit if a \"detected\" can device goes down)\n");
 	fprintf(stderr, "         -d          (monitor dropped CAN frames)\n");
 	fprintf(stderr, "         -e          (dump CAN error frames in human-readable format)\n");
+	fprintf(stderr, "         -8          (display raw DLC values in {} for Classical CAN)\n");
 	fprintf(stderr, "         -x          (print extra message infos, rx/tx brs esi)\n");
-	fprintf(stderr, "         -T <msecs>  (terminate after <msecs> without any reception)\n");
+	fprintf(stderr, "         -T <msecs>  (terminate after <msecs> if no frames were received)\n");
 	fprintf(stderr, "\n");
 	fprintf(stderr, "Up to %d CAN interfaces with optional filter sets can be specified\n", MAXSOCK);
 	fprintf(stderr, "on the commandline in the form: <ifname>[,filter]*\n");
@@ -158,26 +164,27 @@ static void print_usage(char *prg)
 	fprintf(stderr, "Without any given filter all data frames are received ('0:0' default filter).\n");
 	fprintf(stderr, "\nUse interface name '%s' to receive from all CAN interfaces.\n", ANYDEV);
 	fprintf(stderr, "\nExamples:\n");
-	fprintf(stderr, "%s -c -c -ta can0,123:7FF,400:700,#000000FF can2,400~7F0 can3 can8\n\n", prg);
-	fprintf(stderr, "%s -l any,0~0,#FFFFFFFF\n         (log only error frames but no(!) data frames)\n", prg);
-	fprintf(stderr, "%s -l any,0:0,#FFFFFFFF\n         (log error frames and also all data frames)\n", prg);
-	fprintf(stderr, "%s vcan2,12345678:DFFFFFFF\n         (match only for extended CAN ID 12345678)\n", prg);
-	fprintf(stderr, "%s vcan2,123:7FF\n         (matches CAN ID 123 - including EFF and RTR frames)\n", prg);
-	fprintf(stderr, "%s vcan2,123:C00007FF\n         (matches CAN ID 123 - only SFF and non-RTR frames)\n", prg);
+	fprintf(stderr, "%s -c -c -ta can0,123:7FF,400:700,#000000FF can2,400~7F0 can3 can8\n\n", progname);
+	fprintf(stderr, "%s -l any,0~0,#FFFFFFFF\n         (log only error frames but no(!) data frames)\n", progname);
+	fprintf(stderr, "%s -l any,0:0,#FFFFFFFF\n         (log error frames and also all data frames)\n", progname);
+	fprintf(stderr, "%s vcan2,12345678:DFFFFFFF\n         (match only for extended CAN ID 12345678)\n", progname);
+	fprintf(stderr, "%s vcan2,123:7FF\n         (matches CAN ID 123 - including EFF and RTR frames)\n", progname);
+	fprintf(stderr, "%s vcan2,123:C00007FF\n         (matches CAN ID 123 - only SFF and non-RTR frames)\n", progname);
 	fprintf(stderr, "\n");
 }
 
-void sigterm(int signo)
+static void sigterm(int signo)
 {
 	running = 0;
+	signal_num = signo;
 }
 
-int idx2dindex(int ifidx, int socket) {
-
+static int idx2dindex(int ifidx, int socket)
+{
 	int i;
 	struct ifreq ifr;
 
-	for (i=0; i < MAXIFNAMES; i++) {
+	for (i = 0; i < MAXIFNAMES; i++) {
 		if (dindex[i] == ifidx)
 			return i;
 	}
@@ -185,7 +192,7 @@ int idx2dindex(int ifidx, int socket) {
 	/* create new interface index cache entry */
 
 	/* remove index cache zombies first */
-	for (i=0; i < MAXIFNAMES; i++) {
+	for (i = 0; i < MAXIFNAMES; i++) {
 		if (dindex[i]) {
 			ifr.ifr_ifindex = dindex[i];
 			if (ioctl(socket, SIOCGIFNAME, &ifr) < 0)
@@ -193,13 +200,13 @@ int idx2dindex(int ifidx, int socket) {
 		}
 	}
 
-	for (i=0; i < MAXIFNAMES; i++)
+	for (i = 0; i < MAXIFNAMES; i++)
 		if (!dindex[i]) /* free entry */
 			break;
 
 	if (i == MAXIFNAMES) {
 		fprintf(stderr, "Interface index cache only supports %d interfaces.\n",
-		       MAXIFNAMES);
+			MAXIFNAMES);
 		exit(1);
 	}
 
@@ -212,20 +219,80 @@ int idx2dindex(int ifidx, int socket) {
 	if (max_devname_len < (int)strlen(ifr.ifr_name))
 		max_devname_len = strlen(ifr.ifr_name);
 
-	strlcpy(devname[i], ifr.ifr_name, sizeof(devname[i]));
+	strcpy(devname[i], ifr.ifr_name);
 
-#ifdef DEBUG
-	printf("new index %d (%s)\n", i, devname[i]);
-#endif
+	pr_debug("new index %d (%s)\n", i, devname[i]);
 
 	return i;
 }
 
+static int sprint_timestamp(char *ts_buffer, const char timestamp,
+			    const struct timeval *tv, struct timeval *const last_tv)
+{
+	int numchars = 0;
+
+	switch (timestamp) {
+	case 'a': /* absolute with timestamp */
+		numchars = sprintf(ts_buffer, "(%010llu.%06llu) ",
+				   (unsigned long long)tv->tv_sec,
+				   (unsigned long long)tv->tv_usec);
+		break;
+
+	case 'A': /* absolute with date */
+	{
+		struct tm tm;
+		char timestring[25];
+
+		tm = *localtime(&tv->tv_sec);
+		strftime(timestring, 24, "%Y-%m-%d %H:%M:%S", &tm);
+		numchars = sprintf(ts_buffer, "(%s.%06llu) ", timestring,
+				   (unsigned long long)tv->tv_usec);
+	}
+	break;
+
+	case 'd': /* delta */
+	case 'z': /* starting with zero */
+	{
+		struct timeval diff;
+
+		if (last_tv->tv_sec == 0) /* first init */
+			*last_tv = *tv;
+		diff.tv_sec = tv->tv_sec - last_tv->tv_sec;
+		diff.tv_usec = tv->tv_usec - last_tv->tv_usec;
+		if (diff.tv_usec < 0)
+			diff.tv_sec--, diff.tv_usec += 1000000;
+		if (diff.tv_sec < 0)
+			diff.tv_sec = diff.tv_usec = 0;
+		numchars = sprintf(ts_buffer, "(%03llu.%06llu) ",
+				   (unsigned long long)diff.tv_sec,
+				   (unsigned long long)diff.tv_usec);
+
+		if (timestamp == 'd')
+			*last_tv = *tv; /* update for delta calculation */
+	}
+	break;
+
+	default: /* no timestamp output */
+		break;
+	}
+
+	if (numchars <= 0) {
+		ts_buffer[0] = 0; /* empty terminated string */
+		numchars = 0;
+	}
+
+	return numchars;
+}
+
 int main(int argc, char **argv)
 {
-	fd_set rdfs;
-	int s[MAXSOCK];
+	int fd_epoll;
+	struct epoll_event events_pending[MAXSOCK];
+	struct epoll_event event_setup = {
+		.events = EPOLLIN, /* prepare the common part */
+	};
 	unsigned char timestamp = 0;
+	unsigned char logtimestamp = 'a';
 	unsigned char hwtimestamp = 0;
 	unsigned char down_causes_exit = 1;
 	unsigned char dropmonitor = 0;
@@ -238,42 +305,63 @@ int main(int argc, char **argv)
 	unsigned char logfrmt = 0;
 	int count = 0;
 	int rcvbuf_size = 0;
-	int opt;
+	int opt, num_events;
 	int currmax, numfilter;
 	int join_filter;
 	char *ptr, *nptr;
-	struct sockaddr_can addr;
-	char ctrlmsg[CMSG_SPACE(sizeof(struct timeval) + 3*sizeof(struct timespec) + sizeof(__u32))];
+	struct sockaddr_can addr = {
+		.can_family = AF_CAN,
+	};
+#ifndef __NuttX__
+	struct can_raw_vcid_options vcid_opts = {
+		.flags = CAN_RAW_XL_VCID_RX_FILTER,
+		.rx_vcid = 0,
+		.rx_vcid_mask = 0,
+	};
+#endif
+	char ctrlmsg[CMSG_SPACE(sizeof(struct timeval)) +
+		     CMSG_SPACE(3 * sizeof(struct timespec)) +
+		     CMSG_SPACE(sizeof(__u32))];
 	struct iovec iov;
 	struct msghdr msg;
 	struct cmsghdr *cmsg;
 	struct can_filter *rfilter;
 	can_err_mask_t err_mask;
-	struct canfd_frame frame;
-	int nbytes, i, maxdlen;
+	static cu_t cu; /* union for CAN CC/FD/XL frames */
+	int nbytes, i;
 	struct ifreq ifr;
 	struct timeval tv, last_tv;
-	struct timeval timeout, timeout_config = { 0, 0 }, *timeout_current = NULL;
+	int timeout_ms = -1; /* default to no timeout */
 	FILE *logfile = NULL;
+	char fname[83]; /* suggested by -Wformat-overflow= */
+	const char *logname = NULL;
+	static char afrbuf[AFRSZ]; /* ASCII CAN frame buffer size */
+	static int alen;
 
-#if 0 /* NuttX doesn't support these signals */
+#ifndef __NuttX__ /* NuttX doesn't support these signals */
 	signal(SIGTERM, sigterm);
 	signal(SIGHUP, sigterm);
 #endif
 	signal(SIGINT, sigterm);
 
-	last_tv.tv_sec  = 0;
+	last_tv.tv_sec = 0;
 	last_tv.tv_usec = 0;
 
-	while ((opt = getopt(argc, argv, "t:HciaSs:lDdxLn:r:heT:?")) != -1) {
+	progname = basename(argv[0]);
+
+	while ((opt = getopt(argc, argv, "t:HciaSs:lf:Ln:r:Dde8xT:h?")) != -1) {
 		switch (opt) {
 		case 't':
 			timestamp = optarg[0];
+			logtimestamp = optarg[0];
 			if ((timestamp != 'a') && (timestamp != 'A') &&
 			    (timestamp != 'd') && (timestamp != 'z')) {
 				fprintf(stderr, "%s: unknown timestamp mode '%c' - ignored\n",
-				       basename(argv[0]), optarg[0]);
+					progname, optarg[0]);
 				timestamp = 0;
+			}
+			if ((logtimestamp != 'a') && (logtimestamp != 'z')) {
+				logtimestamp = 'a';
 			}
 			break;
 
@@ -301,10 +389,14 @@ int main(int argc, char **argv)
 			view |= CANLIB_VIEW_ERROR;
 			break;
 
+		case '8':
+			view |= CANLIB_VIEW_LEN8_DLC;
+			break;
+
 		case 's':
 			silent = atoi(optarg);
 			if (silent > SILENT_ON) {
-				print_usage(basename(argv[0]));
+				print_usage();
 				exit(1);
 			}
 			break;
@@ -329,10 +421,15 @@ int main(int argc, char **argv)
 			logfrmt = 1;
 			break;
 
+		case 'f':
+			logname = optarg;
+			log = 1;
+			break;
+
 		case 'n':
 			count = atoi(optarg);
 			if (count < 1) {
-				print_usage(basename(argv[0]));
+				print_usage();
 				exit(1);
 			}
 			break;
@@ -340,37 +437,40 @@ int main(int argc, char **argv)
 		case 'r':
 			rcvbuf_size = atoi(optarg);
 			if (rcvbuf_size < 1) {
-				print_usage(basename(argv[0]));
+				print_usage();
 				exit(1);
 			}
 			break;
 
 		case 'T':
 			errno = 0;
-			timeout_config.tv_usec = strtol(optarg, NULL, 0);
+			timeout_ms = strtol(optarg, NULL, 0);
 			if (errno != 0) {
-				print_usage(basename(argv[0]));
+				print_usage();
 				exit(1);
 			}
-			timeout_config.tv_sec = timeout_config.tv_usec / 1000;
-			timeout_config.tv_usec = (timeout_config.tv_usec % 1000) * 1000;
-			timeout_current = &timeout;
 			break;
 		default:
-			print_usage(basename(argv[0]));
+			print_usage();
 			exit(1);
 			break;
 		}
 	}
 
 	if (optind == argc) {
-		print_usage(basename(argv[0]));
+		print_usage();
 		exit(0);
 	}
 
 	if (logfrmt && view) {
-		fprintf(stderr, "Log file format selected: Please disable ASCII/BINARY/SWAP options!\n");
+		fprintf(stderr, "Log file format selected: Please disable ASCII/BINARY/SWAP/RAWDLC options!\n");
 		exit(0);
+	}
+
+	/* "-f -"  is equal to "-L" (print logfile format on stdout) */
+	if (log && logname && strcmp("-", logname) == 0) {
+		log = 0; /* no logging into a file */
+		logfrmt = 1; /* print logformat output to stdout */
 	}
 
 	if (silent == SILENT_INI) {
@@ -388,23 +488,35 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	for (i=0; i < currmax; i++) {
+	fd_epoll = epoll_create1(1);
+	if (fd_epoll < 0) {
+		perror("epoll_create1");
+		return 1;
+	}
 
-		ptr = argv[optind+i];
+	for (i = 0; i < currmax; i++) {
+		struct if_info *obj = &sock_info[i];
+		ptr = argv[optind + i];
 		nptr = strchr(ptr, ',');
 
-#ifdef DEBUG
-		printf("open %d '%s'.\n", i, ptr);
-#endif
+		pr_debug("open %d '%s'.\n", i, ptr);
 
-		s[i] = socket(PF_CAN, SOCK_RAW, CAN_RAW);
-		if (s[i] < 0) {
+		obj->s = socket(PF_CAN, SOCK_RAW, CAN_RAW);
+		if (obj->s < 0) {
 			perror("socket");
 			return 1;
 		}
 
+		event_setup.data.ptr = obj; /* remember the instance as private data */
+		if (epoll_ctl(fd_epoll, EPOLL_CTL_ADD, obj->s, &event_setup)) {
+			perror("failed to add socket to epoll");
+			return 1;
+		}
+
+		obj->cmdlinename = ptr; /* save pointer to cmdline name of this socket */
+
 		if (nptr)
-			nbytes = nptr - ptr;  /* interface name is up the first ',' */
+			nbytes = nptr - ptr; /* interface name is up the first ',' */
 		else
 			nbytes = strlen(ptr); /* no ',' found => no filter definitions */
 
@@ -416,17 +528,13 @@ int main(int argc, char **argv)
 		if (nbytes > max_devname_len)
 			max_devname_len = nbytes; /* for nice printing */
 
-		addr.can_family = AF_CAN;
-
 		memset(&ifr.ifr_name, 0, sizeof(ifr.ifr_name));
 		strncpy(ifr.ifr_name, ptr, nbytes);
 
-#ifdef DEBUG
-		printf("using interface name '%s'.\n", ifr.ifr_name);
-#endif
+		pr_debug("using interface name '%s'.\n", ifr.ifr_name);
 
-		if (strcmp(ANYDEV, ifr.ifr_name)) {
-			if (ioctl(s[i], SIOCGIFINDEX, &ifr) < 0) {
+		if (strcmp(ANYDEV, ifr.ifr_name) != 0) {
+			if (ioctl(obj->s, SIOCGIFINDEX, &ifr) < 0) {
 				perror("SIOCGIFINDEX");
 				exit(1);
 			}
@@ -435,7 +543,6 @@ int main(int argc, char **argv)
 			addr.can_ifindex = 0; /* any can interface */
 
 		if (nptr) {
-
 			/* found a ',' after the interface name => check for filters */
 
 			/* determine number of filters to alloc the filter space */
@@ -459,44 +566,44 @@ int main(int argc, char **argv)
 
 			while (nptr) {
 
-				ptr = nptr+1; /* hop behind the ',' */
+				ptr = nptr + 1; /* hop behind the ',' */
 				nptr = strchr(ptr, ','); /* update exit condition */
 
-				if (sscanf(ptr, "%" SCNx32 ":%" SCNx32,
+				if (sscanf(ptr, "%lx:%lx",
 					   &rfilter[numfilter].can_id,
 					   &rfilter[numfilter].can_mask) == 2) {
- 					rfilter[numfilter].can_mask &= ~CAN_ERR_FLAG;
-					if (*(ptr+8) == ':')
+					rfilter[numfilter].can_mask &= ~CAN_ERR_FLAG;
+					if (*(ptr + 8) == ':')
 						rfilter[numfilter].can_id |= CAN_EFF_FLAG;
 					numfilter++;
-				} else if (sscanf(ptr, "%" SCNx32 "~%" SCNx32,
+				} else if (sscanf(ptr, "%lx~%lx",
 						  &rfilter[numfilter].can_id,
 						  &rfilter[numfilter].can_mask) == 2) {
- 					rfilter[numfilter].can_id |= CAN_INV_FILTER;
- 					rfilter[numfilter].can_mask &= ~CAN_ERR_FLAG;
-					if (*(ptr+8) == '~')
+					rfilter[numfilter].can_id |= CAN_INV_FILTER;
+					rfilter[numfilter].can_mask &= ~CAN_ERR_FLAG;
+					if (*(ptr + 8) == '~')
 						rfilter[numfilter].can_id |= CAN_EFF_FLAG;
 					numfilter++;
 				} else if (*ptr == 'j' || *ptr == 'J') {
 					join_filter = 1;
-				} else if (sscanf(ptr, "#%" SCNx32, &err_mask) != 1) {
+				} else if (sscanf(ptr, "#%lx", &err_mask) != 1) {
 					fprintf(stderr, "Error in filter option parsing: '%s'\n", ptr);
 					return 1;
 				}
 			}
 
 			if (err_mask)
-				setsockopt(s[i], SOL_CAN_RAW, CAN_RAW_ERR_FILTER,
+				setsockopt(obj->s, SOL_CAN_RAW, CAN_RAW_ERR_FILTER,
 					   &err_mask, sizeof(err_mask));
 
-			if (join_filter && setsockopt(s[i], SOL_CAN_RAW, CAN_RAW_JOIN_FILTERS,
+			if (join_filter && setsockopt(obj->s, SOL_CAN_RAW, CAN_RAW_JOIN_FILTERS,
 						      &join_filter, sizeof(join_filter)) < 0) {
 				perror("setsockopt CAN_RAW_JOIN_FILTERS not supported by your Linux Kernel");
 				return 1;
 			}
 
 			if (numfilter)
-				setsockopt(s[i], SOL_CAN_RAW, CAN_RAW_FILTER,
+				setsockopt(obj->s, SOL_CAN_RAW, CAN_RAW_FILTER,
 					   rfilter, numfilter * sizeof(struct can_filter));
 
 			free(rfilter);
@@ -504,26 +611,31 @@ int main(int argc, char **argv)
 		} /* if (nptr) */
 
 		/* try to switch the socket into CAN FD mode */
-		setsockopt(s[i], SOL_CAN_RAW, CAN_RAW_FD_FRAMES, &canfd_on, sizeof(canfd_on));
+		setsockopt(obj->s, SOL_CAN_RAW, CAN_RAW_FD_FRAMES, &canfx_on, sizeof(canfx_on));
+
+#ifndef __NuttX__
+		/* try to switch the socket into CAN XL mode */
+		setsockopt(obj->s, SOL_CAN_RAW, CAN_RAW_XL_FRAMES, &canfx_on, sizeof(canfx_on));
+
+		/* try to enable the CAN XL VCID pass through mode */
+		setsockopt(obj->s, SOL_CAN_RAW, CAN_RAW_XL_VCID_OPTS, &vcid_opts, sizeof(vcid_opts));
+#endif
 
 		if (rcvbuf_size) {
-
 			int curr_rcvbuf_size;
 			socklen_t curr_rcvbuf_size_len = sizeof(curr_rcvbuf_size);
 
 			/* try SO_RCVBUFFORCE first, if we run with CAP_NET_ADMIN */
-			if (setsockopt(s[i], SOL_SOCKET, SO_RCVBUFFORCE,
+			if (setsockopt(obj->s, SOL_SOCKET, SO_RCVBUFFORCE,
 				       &rcvbuf_size, sizeof(rcvbuf_size)) < 0) {
-#ifdef DEBUG
-				printf("SO_RCVBUFFORCE failed so try SO_RCVBUF ...\n");
-#endif
-				if (setsockopt(s[i], SOL_SOCKET, SO_RCVBUF,
+				pr_debug("SO_RCVBUFFORCE failed so try SO_RCVBUF ...\n");
+				if (setsockopt(obj->s, SOL_SOCKET, SO_RCVBUF,
 					       &rcvbuf_size, sizeof(rcvbuf_size)) < 0) {
 					perror("setsockopt SO_RCVBUF");
 					return 1;
 				}
 
-				if (getsockopt(s[i], SOL_SOCKET, SO_RCVBUF,
+				if (getsockopt(obj->s, SOL_SOCKET, SO_RCVBUF,
 					       &curr_rcvbuf_size, &curr_rcvbuf_size_len) < 0) {
 					perror("getsockopt SO_RCVBUF");
 					return 1;
@@ -531,28 +643,27 @@ int main(int argc, char **argv)
 
 				/* Only print a warning the first time we detect the adjustment */
 				/* n.b.: The wanted size is doubled in Linux in net/sore/sock.c */
-				if (!i && curr_rcvbuf_size < rcvbuf_size*2)
+				if (!i && curr_rcvbuf_size < rcvbuf_size * 2)
 					fprintf(stderr, "The socket receive buffer size was "
 						"adjusted due to /proc/sys/net/core/rmem_max.\n");
 			}
 		}
 
 		if (timestamp || log || logfrmt) {
-
 			if (hwtimestamp) {
-				const int timestamping_flags = (SOF_TIMESTAMPING_SOFTWARE | \
-								SOF_TIMESTAMPING_RX_SOFTWARE | \
+				const int timestamping_flags = (SOF_TIMESTAMPING_SOFTWARE |
+								SOF_TIMESTAMPING_RX_SOFTWARE |
 								SOF_TIMESTAMPING_RAW_HARDWARE);
 
-				if (setsockopt(s[i], SOL_SOCKET, SO_TIMESTAMPING,
-						&timestamping_flags, sizeof(timestamping_flags)) < 0) {
+				if (setsockopt(obj->s, SOL_SOCKET, SO_TIMESTAMPING,
+					       &timestamping_flags, sizeof(timestamping_flags)) < 0) {
 					perror("setsockopt SO_TIMESTAMPING is not supported by your Linux kernel");
 					return 1;
 				}
 			} else {
 				const int timestamp_on = 1;
 
-				if (setsockopt(s[i], SOL_SOCKET, SO_TIMESTAMP,
+				if (setsockopt(obj->s, SOL_SOCKET, SO_TIMESTAMP,
 					       &timestamp_on, sizeof(timestamp_on)) < 0) {
 					perror("setsockopt SO_TIMESTAMP");
 					return 1;
@@ -561,48 +672,50 @@ int main(int argc, char **argv)
 		}
 
 		if (dropmonitor) {
-
 			const int dropmonitor_on = 1;
 
-			if (setsockopt(s[i], SOL_SOCKET, SO_RXQ_OVFL,
+			if (setsockopt(obj->s, SOL_SOCKET, SO_RXQ_OVFL,
 				       &dropmonitor_on, sizeof(dropmonitor_on)) < 0) {
 				perror("setsockopt SO_RXQ_OVFL not supported by your Linux Kernel");
 				return 1;
 			}
 		}
 
-		if (bind(s[i], (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		if (bind(obj->s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 			perror("bind");
 			return 1;
 		}
 	}
 
 	if (log) {
-		time_t currtime;
-		struct tm now;
-		char fname[83]; /* suggested by -Wformat-overflow= */
+		if (!logname) {
+			time_t currtime;
+			struct tm now;
 
-		if (time(&currtime) == (time_t)-1) {
-			perror("time");
-			return 1;
+			if (time(&currtime) == (time_t)-1) {
+				perror("time");
+				return 1;
+			}
+
+			localtime_r(&currtime, &now);
+
+			snprintf(fname, sizeof(fname), "candump-%04d-%02d-%02d_%02d%02d%02d.log",
+				now.tm_year + 1900,
+				now.tm_mon + 1,
+				now.tm_mday,
+				now.tm_hour,
+				now.tm_min,
+				now.tm_sec);
+
+			logname = fname;
 		}
-
-		localtime_r(&currtime, &now);
-
-		sprintf(fname, "candump-%04d-%02d-%02d_%02d%02d%02d.log",
-			now.tm_year + 1900,
-			now.tm_mon + 1,
-			now.tm_mday,
-			now.tm_hour,
-			now.tm_min,
-			now.tm_sec);
 
 		if (silent != SILENT_ON)
 			fprintf(stderr, "Warning: Console output active while logging!\n");
 
-		fprintf(stderr, "Enabling Logfile '%s'\n", fname);
+		fprintf(stderr, "Enabling Logfile '%s'\n", logname);
 
-		logfile = fopen(fname, "w");
+		logfile = fopen(logname, "w");
 		if (!logfile) {
 			perror("logfile");
 			return 1;
@@ -610,208 +723,196 @@ int main(int argc, char **argv)
 	}
 
 	/* these settings are static and can be held out of the hot path */
-	iov.iov_base = &frame;
+	iov.iov_base = &cu;
 	msg.msg_name = &addr;
 	msg.msg_iov = &iov;
 	msg.msg_iovlen = 1;
 	msg.msg_control = &ctrlmsg;
 
 	while (running) {
+		num_events = epoll_wait(fd_epoll, events_pending, currmax, timeout_ms);
+		if (num_events == -1) {
+			if (errno != EINTR)
+				running = 0;
+			continue;
+		}
 
-		FD_ZERO(&rdfs);
-		for (i=0; i<currmax; i++)
-			FD_SET(s[i], &rdfs);
-
-		if (timeout_current)
-			*timeout_current = timeout_config;
-
-		if ((select(s[currmax-1]+1, &rdfs, NULL, NULL, timeout_current)) <= 0) {
-			//perror("select");
+		/* handle timeout */
+		if (!num_events && timeout_ms >= 0) {
 			running = 0;
 			continue;
 		}
 
-		for (i=0; i<currmax; i++) {  /* check all CAN RAW sockets */
+		for (i = 0; i < num_events; i++) { /* check waiting CAN RAW sockets */
+			struct if_info *obj = events_pending[i].data.ptr;
+			int idx;
+			char *extra_info = "";
 
-			if (FD_ISSET(s[i], &rdfs)) {
+			/* these settings may be modified by recvmsg() */
+			iov.iov_len = sizeof(cu);
+			msg.msg_namelen = sizeof(addr);
+			msg.msg_controllen = sizeof(ctrlmsg);
+			msg.msg_flags = 0;
 
-				int idx;
+			nbytes = recvmsg(obj->s, &msg, 0);
+			idx = idx2dindex(addr.can_ifindex, obj->s);
 
-				/* these settings may be modified by recvmsg() */
-				iov.iov_len = sizeof(frame);
-				msg.msg_namelen = sizeof(addr);
-				msg.msg_controllen = sizeof(ctrlmsg);
-				msg.msg_flags = 0;
-
-				nbytes = recvmsg(s[i], &msg, 0);
-				idx = idx2dindex(addr.can_ifindex, s[i]);
-
-				if (nbytes < 0) {
-					if ((errno == ENETDOWN) && !down_causes_exit) {
-						fprintf(stderr, "%s: interface down\n", devname[idx]);
-						continue;
-					}
-					perror("read");
-					return 1;
+			if (nbytes < 0) {
+				if ((errno == ENETDOWN) && !down_causes_exit) {
+					fprintf(stderr, "%s: interface down\n", devname[idx]);
+					continue;
 				}
-
-				if ((size_t)nbytes == CAN_MTU)
-					maxdlen = CAN_MAX_DLEN;
-				else if ((size_t)nbytes == CANFD_MTU)
-					maxdlen = CANFD_MAX_DLEN;
-				else {
-					fprintf(stderr, "read: incomplete CAN frame\n");
-					return 1;
-				}
-
-				if (count && (--count == 0))
-					running = 0;
-
-				for (cmsg = CMSG_FIRSTHDR(&msg);
-				     cmsg && (cmsg->cmsg_level == SOL_SOCKET);
-				     cmsg = CMSG_NXTHDR(&msg,cmsg)) {
-					if (cmsg->cmsg_type == SO_TIMESTAMP) {
-						memcpy(&tv, CMSG_DATA(cmsg), sizeof(tv));
-					} else if (cmsg->cmsg_type == SO_TIMESTAMPING) {
-
-						struct timespec *stamp = (struct timespec *)CMSG_DATA(cmsg);
-
-						/*
-						 * stamp[0] is the software timestamp
-						 * stamp[1] is deprecated
-						 * stamp[2] is the raw hardware timestamp
-						 * See chapter 2.1.2 Receive timestamps in
-						 * linux/Documentation/networking/timestamping.txt
-						 */
-						tv.tv_sec = stamp[2].tv_sec;
-						tv.tv_usec = stamp[2].tv_nsec/1000;
-					} else if (cmsg->cmsg_type == SO_RXQ_OVFL)
-						memcpy(&dropcnt[i], CMSG_DATA(cmsg), sizeof(__u32));
-				}
-
-				/* check for (unlikely) dropped frames on this specific socket */
-				if (dropcnt[i] != last_dropcnt[i]) {
-
-					__u32 frames = dropcnt[i] - last_dropcnt[i];
-
-					if (silent != SILENT_ON)
-						printf("DROPCOUNT: dropped %" PRId32 " CAN frame%s on '%s' socket (total drops %" PRId32 ")\n",
-						       (uint32_t)frames, (frames > 1)?"s":"", devname[idx], (uint32_t)dropcnt[i]);
-
-					if (log)
-						fprintf(logfile, "DROPCOUNT: dropped %" PRId32 " CAN frame%s on '%s' socket (total drops %" PRId32 ")\n",
-							(uint32_t)frames, (frames > 1)?"s":"", devname[idx], (uint32_t)dropcnt[i]);
-
-					last_dropcnt[i] = dropcnt[i];
-				}
-
-				/* once we detected a EFF frame indent SFF frames accordingly */
-				if (frame.can_id & CAN_EFF_FLAG)
-					view |= CANLIB_VIEW_INDENT_SFF;
-
-				if (log) {
-					char buf[CL_CFSZ]; /* max length */
-
-					/* log CAN frame with absolute timestamp & device */
-					sprint_canframe(buf, &frame, 0, maxdlen);
-					fprintf(logfile, "(%010ju.%06ld) %*s %s\n",
-						(uintmax_t)tv.tv_sec, tv.tv_usec,
-						max_devname_len, devname[idx], buf);
-				}
-
-				if ((logfrmt) && (silent == SILENT_OFF)){
-					char buf[CL_CFSZ]; /* max length */
-
-					/* print CAN frame in log file style to stdout */
-					sprint_canframe(buf, &frame, 0, maxdlen);
-					printf("(%010ju.%06ld) %*s %s\n",
-					       (uintmax_t)tv.tv_sec, tv.tv_usec,
-					       max_devname_len, devname[idx], buf);
-					goto out_fflush; /* no other output to stdout */
-				}
-
-				if (silent != SILENT_OFF){
-					if (silent == SILENT_ANI) {
-						printf("%c\b", anichar[silentani%=MAXANI]);
-						silentani++;
-					}
-					goto out_fflush; /* no other output to stdout */
-				}
-
-				printf(" %s", (color>2)?col_on[idx%MAXCOL]:"");
-
-				switch (timestamp) {
-
-				case 'a': /* absolute with timestamp */
-					printf("(%010ju.%06ld) ",
-						   (uintmax_t)tv.tv_sec, tv.tv_usec);
-					break;
-
-				case 'A': /* absolute with date */
-				{
-					struct tm tm;
-					char timestring[25];
-
-					tm = *localtime(&tv.tv_sec);
-					strftime(timestring, 24, "%Y-%m-%d %H:%M:%S", &tm);
-					printf("(%s.%06ld) ", timestring, tv.tv_usec);
-				}
-				break;
-
-				case 'd': /* delta */
-				case 'z': /* starting with zero */
-				{
-					struct timeval diff;
-
-					if (last_tv.tv_sec == 0)   /* first init */
-						last_tv = tv;
-					diff.tv_sec  = tv.tv_sec  - last_tv.tv_sec;
-					diff.tv_usec = tv.tv_usec - last_tv.tv_usec;
-					if (diff.tv_usec < 0)
-						diff.tv_sec--, diff.tv_usec += 1000000;
-					if (diff.tv_sec < 0)
-						diff.tv_sec = diff.tv_usec = 0;
-					printf("(%03ju.%06ld) ",
-						   (uintmax_t)diff.tv_sec, diff.tv_usec);
-
-					if (timestamp == 'd')
-						last_tv = tv; /* update for delta calculation */
-				}
-				break;
-
-				default: /* no timestamp output */
-					break;
-				}
-
-				printf(" %s", (color && (color<3))?col_on[idx%MAXCOL]:"");
-				printf("%*s", max_devname_len, devname[idx]);
-
-				if (extra_msg_info) {
-
-					if (msg.msg_flags & MSG_DONTROUTE)
-						printf ("  TX %s", extra_m_info[frame.flags & 3]);
-					else
-						printf ("  RX %s", extra_m_info[frame.flags & 3]);
-				}
-
-				printf("%s  ", (color==1)?col_off:"");
-
-				fprint_long_canframe(stdout, &frame, NULL, view, maxdlen);
-
-				printf("%s", (color>1)?col_off:"");
-				printf("\n");
+				perror("read");
+				return 1;
 			}
 
-		out_fflush:
+			/* mark dual-use struct canfd_frame */
+			if (nbytes < (int)CANXL_HDR_SIZE + CANXL_MIN_DLEN) {
+				fprintf(stderr, "read: no CAN frame\n");
+				return 1;
+			}
+
+			if (cu.xl.flags & CANXL_XLF) {
+				if (nbytes != (int)CANXL_HDR_SIZE + cu.xl.len) {
+					printf("nbytes = %d\n", nbytes);
+					fprintf(stderr, "read: no CAN XL frame\n");
+					return 1;
+				}
+			} else {
+				if (nbytes == CAN_MTU)
+					cu.fd.flags = 0;
+				else if (nbytes == CANFD_MTU)
+					cu.fd.flags |= CANFD_FDF;
+				else {
+					fprintf(stderr, "read: incomplete CAN CC/FD frame\n");
+					return 1;
+				}
+			}
+
+			if (count && (--count == 0))
+				running = 0;
+
+			for (cmsg = CMSG_FIRSTHDR(&msg);
+			     cmsg && (cmsg->cmsg_level == SOL_SOCKET);
+			     cmsg = CMSG_NXTHDR(&msg,cmsg)) {
+				if (cmsg->cmsg_type == SO_TIMESTAMP) {
+					memcpy(&tv, CMSG_DATA(cmsg), sizeof(tv));
+				} else if (cmsg->cmsg_type == SO_TIMESTAMPING) {
+					struct timespec *stamp = (struct timespec *)CMSG_DATA(cmsg);
+
+					/*
+					 * stamp[0] is the software timestamp
+					 * stamp[1] is deprecated
+					 * stamp[2] is the raw hardware timestamp
+					 * See chapter 2.1.2 Receive timestamps in
+					 * linux/Documentation/networking/timestamping.txt
+					 */
+					tv.tv_sec = stamp[2].tv_sec;
+					tv.tv_usec = stamp[2].tv_nsec / 1000;
+				} else if (cmsg->cmsg_type == SO_RXQ_OVFL) {
+					memcpy(&obj->dropcnt, CMSG_DATA(cmsg), sizeof(__u32));
+				}
+			}
+
+			/* check for (unlikely) dropped frames on this specific socket */
+			if (obj->dropcnt != obj->last_dropcnt) {
+				__u32 frames = obj->dropcnt - obj->last_dropcnt;
+
+				if (silent != SILENT_ON)
+					printf("DROPCOUNT: dropped %lu CAN frame%s on '%s' socket (total drops %lu)\n",
+					       frames, (frames > 1)?"s":"", devname[idx], obj->dropcnt);
+
+				if (log)
+					fprintf(logfile, "DROPCOUNT: dropped %lu CAN frame%s on '%s' socket (total drops %lu)\n",
+						frames, (frames > 1)?"s":"", devname[idx], obj->dropcnt);
+
+				obj->last_dropcnt = obj->dropcnt;
+			}
+
+			/* once we detected a EFF frame indent SFF frames accordingly */
+			if (cu.fd.can_id & CAN_EFF_FLAG)
+				view |= CANLIB_VIEW_INDENT_SFF;
+
+			if (extra_msg_info) {
+				if (msg.msg_flags & MSG_DONTROUTE)
+					extra_info = " T";
+				else
+					extra_info = " R";
+			}
+
+			/* build common log format output */
+			if ((log) || ((logfrmt) && (silent == SILENT_OFF))) {
+
+				alen = sprint_timestamp(afrbuf, logtimestamp,
+							  &tv, &last_tv);
+
+				alen += sprintf(afrbuf + alen, "%*s ",
+						  max_devname_len, devname[idx]);
+
+				alen += snprintf_canframe(afrbuf + alen, sizeof(afrbuf) - alen, &cu, 0);
+			}
+
+			/* write CAN frame in log file style to logfile */
+			if (log)
+				fprintf(logfile, "%s%s\n", afrbuf, extra_info);
+
+			/* print CAN frame in log file style to stdout */
+			if ((logfrmt) && (silent == SILENT_OFF)) {
+				printf("%s%s\n", afrbuf, extra_info);
+				goto out_fflush; /* no other output to stdout */
+			}
+
+			/* print only animation */
+			if (silent != SILENT_OFF) {
+				if (silent == SILENT_ANI) {
+					printf("%c\b", anichar[silentani %= MAXANI]);
+					silentani++;
+				}
+				goto out_fflush; /* no other output to stdout */
+			}
+
+			/* print (colored) long CAN frame style to stdout */
+			alen = sprintf(afrbuf, " %s", (color > 2) ? col_on[idx % MAXCOL] : "");
+			alen += sprint_timestamp(afrbuf + alen, timestamp, &tv, &last_tv);
+			alen += sprintf(afrbuf + alen, " %s%*s",
+					  (color && (color < 3)) ? col_on[idx % MAXCOL] : "",
+					  max_devname_len, devname[idx]);
+
+			if (extra_msg_info) {
+				if (msg.msg_flags & MSG_DONTROUTE)
+					alen += sprintf(afrbuf + alen, "  TX %s",
+							  extra_m_info[cu.fd.flags & 3]);
+				else
+					alen += sprintf(afrbuf + alen, "  RX %s",
+							  extra_m_info[cu.fd.flags & 3]);
+			}
+
+			alen += sprintf(afrbuf + alen, "%s  ", (color == 1) ? col_off : "");
+			alen += snprintf_long_canframe(afrbuf + alen, sizeof(afrbuf) - alen, &cu, view);
+
+			if ((view & CANLIB_VIEW_ERROR) && (cu.fd.can_id & CAN_ERR_FLAG)) {
+				alen += sprintf(afrbuf + alen, "\n\t");
+				alen += snprintf_can_error_frame(afrbuf + alen,
+								 sizeof(afrbuf) - alen,
+								 &cu.fd, "\n\t");
+			}
+
+			printf("%s%s\n", afrbuf, (color > 1) ? col_off : "");
+out_fflush:
 			fflush(stdout);
 		}
 	}
 
-	for (i=0; i<currmax; i++)
-		close(s[i]);
+	for (i = 0; i < currmax; i++)
+		close(sock_info[i].s);
+
+	close(fd_epoll);
 
 	if (log)
 		fclose(logfile);
+
+	if (signal_num)
+		return 128 + signal_num;
 
 	return 0;
 }

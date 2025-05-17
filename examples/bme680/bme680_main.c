@@ -80,6 +80,7 @@ int main(int argc, FAR char *argv[])
       return -1;
     }
 
+#if 0
   hum_fd = open("/dev/uorb/sensor_humi0", O_RDONLY | O_NONBLOCK);
   if (hum_fd < 0)
     {
@@ -93,7 +94,7 @@ int main(int argc, FAR char *argv[])
       printf("Failed to open gas lowerhalf.\n");
       return -1;
     }
-
+#endif
   /* Configure the sensor */
 
   struct bme680_config_s config;
@@ -119,14 +120,14 @@ int main(int argc, FAR char *argv[])
 
   struct pollfd pfds[] = {
     {.fd = baro_fd, .events = POLLIN},
-    {.fd = hum_fd, .events = POLLIN},
-    {.fd = gas_fd, .events = POLLIN}
+    //{.fd = hum_fd, .events = POLLIN},
+    //{.fd = gas_fd, .events = POLLIN}
   };
 
   struct data sensor_data[] = {
     {.data_struct = &baro_data, .data_size = sizeof(struct sensor_baro)},
-    {.data_struct = &humi_data, .data_size = sizeof(struct sensor_humi)},
-    {.data_struct = &gas_data, .data_size = sizeof(struct sensor_gas)}
+    //{.data_struct = &humi_data, .data_size = sizeof(struct sensor_humi)},
+    //{.data_struct = &gas_data, .data_size = sizeof(struct sensor_gas)}
   };
 
   seconds = 5 * 60;

@@ -1,0 +1,21 @@
+#
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
+#
+
+config CANUTILS_CANGEN
+	tristate "SocketCAN cangen tool"
+	default n
+	depends on NET_CAN
+	select CANUTILS_LIBCANUTILS
+	---help---
+		Enable the SocketCAN cangen tool ported from
+		https://github.com/linux-can/can-utils
+
+if CANUTILS_CANGEN
+
+config CANUTILS_CANGEN_STACKSIZE
+	int "SocketCAN cangen stack size"
+	default DEFAULT_TASK_STACKSIZE
+
+endif

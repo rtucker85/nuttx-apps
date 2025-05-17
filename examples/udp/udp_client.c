@@ -39,6 +39,7 @@
 #include <netinet/in.h>
 
 #include "udp.h"
+#include "tinycbor/cbor.h"
 
 /****************************************************************************
  * Private Functions
@@ -97,6 +98,7 @@ static int create_socket(void)
   return sockfd;
 }
 
+#if 0
 static inline void fill_buffer(unsigned char *buf, int offset)
 {
   int ch;
@@ -113,6 +115,37 @@ static inline void fill_buffer(unsigned char *buf, int offset)
       buf[j] = ch;
     }
 }
+#endif
+
+static inline size_t fill_buffer(unsigned char *buf)
+{
+  static uint16_t value_x = 0;
+  static uint16_t value_y = UINT16_MAX;
+  CborEncoder encoder;
+  cbor_encoder_init(&encoder, buf, 256, 0);
+
+  CborError res;
+  CborEncoder map_encoder;
+  res = cbor_encoder_create_map(&encoder, &map_encoder, 2);
+  assert(res == CborNoError);
+
+  res = cbor_encode_text_stringz(&map_encoder, "x");
+  assert(res == CborNoError);
+
+  res = cbor_encode_uint(&map_encoder, value_x++);
+  assert(res == CborNoError);
+
+  res = cbor_encode_text_stringz(&map_encoder, "y");
+  assert(res == CborNoError);
+
+  res = cbor_encode_uint(&map_encoder, value_y--);
+  assert(res == CborNoError);
+
+  res = cbor_encoder_close_container(&encoder, &map_encoder);
+  assert(res == CborNoError);
+
+  return cbor_encoder_get_buffer_size(&encoder, buf);
+}
 
 /****************************************************************************
  * Public Functions
@@ -125,15 +158,16 @@ void udp_client(void)
 #else
   struct sockaddr_in server;
 #endif
-  unsigned char outbuf[SENDSIZE];
+  unsigned char outbuf[256];
   socklen_t addrlen;
   int sockfd;
   int nbytes;
-  int offset;
+  int offset = 0;
 #ifdef CONFIG_EXAMPLES_UDP_BROADCAST
   int optval;
   int ret;
 #endif
+
 
   /* Create a new UDP socket */
 
@@ -156,11 +190,13 @@ void udp_client(void)
 
   /* Then send and receive 256 messages */
 
-  for (offset = 0; offset < 256; offset++)
+  //for (offset = 0; offset < 256; offset++)
+  for(;;)
     {
       /* Set up the output buffer */
 
-      fill_buffer(outbuf, offset);
+      size_t len = fill_buffer(outbuf);
+
 
       /* Set up the server address */
 
@@ -179,8 +215,8 @@ void udp_client(void)
 
       /* Send the message */
 
-      printf("client: %d. Sending %d bytes\n", offset, SENDSIZE);
-      nbytes = sendto(sockfd, outbuf, SENDSIZE, 0,
+      printf("client: %d. Sending %d bytes\n", offset, len);  
+      nbytes = sendto(sockfd, outbuf, len, 0,
                       (struct sockaddr *)&server, addrlen);
       printf("client: %d. Sent %d bytes\n", offset, nbytes);
 
@@ -190,7 +226,7 @@ void udp_client(void)
           close(sockfd);
           exit(-1);
         }
-      else if (nbytes != SENDSIZE)
+      else if (nbytes != len)
         {
           printf("client: %d. Bad send length: %d Expected: %d\n",
                  offset, nbytes, SENDSIZE);
@@ -202,7 +238,7 @@ void udp_client(void)
        * the server.
        */
 
-      sleep(2);
+      usleep(500);
     }
 
   close(sockfd);

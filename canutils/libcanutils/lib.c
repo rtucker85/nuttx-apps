@@ -1,7 +1,9 @@
-/****************************************************************************
+/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause) */
+/*
+ * lib.c - library for command line tools
  *
- * SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
- * SPDX-FileCopyrightText: 2002-2007 Volkswagen Group Electronic Research
+ * Copyright (c) 2002-2007 Volkswagen Group Electronic Research
+ * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -38,25 +40,29 @@
  *
  * Send feedback to <linux-can@vger.kernel.org>
  *
- ****************************************************************************/
+ */
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdint.h>
+#include <time.h>
 
 #include <sys/param.h>
 #include <sys/socket.h> /* for sa_family_t */
+#include <netpacket/can.h>
 #include <nuttx/can.h>
 
 #include "lib.h"
 
 #define CANID_DELIM '#'
-#define DATA_SEPARATOR '.'
+#define CC_DLC_DELIM '_'
+#define XL_HDR_DELIM ':'
+#define DATA_SEPERATOR '.'
 
 const char hex_asc_upper[] = "0123456789ABCDEF";
 
-#define hex_asc_upper_lo(x)	hex_asc_upper[((x) & 0x0F)]
-#define hex_asc_upper_hi(x)	hex_asc_upper[((x) & 0xF0) >> 4]
+#define hex_asc_upper_lo(x) hex_asc_upper[((x)&0x0F)]
+#define hex_asc_upper_hi(x) hex_asc_upper[((x)&0xF0) >> 4]
 
 static inline void put_hex_byte(char *buf, __u8 byte)
 {
@@ -81,10 +87,10 @@ static inline void _put_id(char *buf, int end_offset, canid_t id)
 static const unsigned char dlc2len[] = {0, 1, 2, 3, 4, 5, 6, 7,
 					8, 12, 16, 20, 24, 32, 48, 64};
 
-/* get data length from can_dlc with sanitized can_dlc */
-unsigned char can_dlc2len(unsigned char can_dlc)
+/* get data length from raw data length code (DLC) */
+unsigned char can_fd_dlc2len(unsigned char dlc)
 {
-	return dlc2len[can_dlc & 0x0F];
+	return dlc2len[dlc & 0x0F];
 }
 
 static const unsigned char len2dlc[] = {0, 1, 2, 3, 4, 5, 6, 7, 8,		/* 0 - 8 */
@@ -99,7 +105,7 @@ static const unsigned char len2dlc[] = {0, 1, 2, 3, 4, 5, 6, 7, 8,		/* 0 - 8 */
 					15, 15, 15, 15, 15, 15, 15, 15};	/* 57 - 64 */
 
 /* map the sanitized data length to an appropriate data length code */
-unsigned char can_len2dlc(unsigned char len)
+unsigned char can_fd_len2dlc(unsigned char len)
 {
 	if (len > 64)
 		return 0xF;
@@ -107,8 +113,8 @@ unsigned char can_len2dlc(unsigned char len)
 	return len2dlc[len];
 }
 
-unsigned char asc2nibble(char c) {
-
+unsigned char asc2nibble(char c)
+{
 	if ((c >= '0') && (c <= '9'))
 		return c - '0';
 
@@ -121,26 +127,25 @@ unsigned char asc2nibble(char c) {
 	return 16; /* error */
 }
 
-int hexstring2data(char *arg, unsigned char *data, int maxdlen) {
-
+int hexstring2data(char *arg, unsigned char *data, int maxdlen)
+{
 	int len = strlen(arg);
 	int i;
 	unsigned char tmp;
 
-	if (!len || len%2 || len > maxdlen*2)
+	if (!len || len % 2 || len > maxdlen * 2)
 		return 1;
 
 	memset(data, 0, maxdlen);
 
-	for (i=0; i < len/2; i++) {
-
-		tmp = asc2nibble(*(arg+(2*i)));
+	for (i = 0; i < len / 2; i++) {
+		tmp = asc2nibble(*(arg + (2 * i)));
 		if (tmp > 0x0F)
 			return 1;
 
 		data[i] = (tmp << 4);
 
-		tmp = asc2nibble(*(arg+(2*i)+1));
+		tmp = asc2nibble(*(arg + (2 * i) + 1));
 		if (tmp > 0x0F)
 			return 1;
 
@@ -150,239 +155,464 @@ int hexstring2data(char *arg, unsigned char *data, int maxdlen) {
 	return 0;
 }
 
-int parse_canframe(char *cs, struct canfd_frame *cf) {
+int parse_canframe(char *cs, cu_t *cu)
+{
 	/* documentation see lib.h */
 
 	int i, idx, dlen, len;
 	int maxdlen = CAN_MAX_DLEN;
-	int ret = CAN_MTU;
-	unsigned char tmp;
+	int mtu = CAN_MTU;
+	__u8 *data = cu->fd.data; /* fill CAN CC/FD data by default */
+	canid_t tmp;
 
 	len = strlen(cs);
-	//printf("'%s' len %d\n", cs, len);
+	printf("'%s' len %d\n", cs, len);
 
-	memset(cf, 0, sizeof(*cf)); /* init CAN FD frame, e.g. LEN = 0 */
+	memset(cu, 0, sizeof(*cu)); /* init CAN CC/FD/XL frame, e.g. LEN = 0 */
 
 	if (len < 4)
 		return 0;
 
-	if (cs[3] == CANID_DELIM) { /* 3 digits */
+	if (cs[3] == CANID_DELIM) { /* 3 digits SFF */
 
 		idx = 4;
-		for (i=0; i<3; i++){
+		for (i = 0; i < 3; i++) {
 			if ((tmp = asc2nibble(cs[i])) > 0x0F)
 				return 0;
-			cf->can_id |= (tmp << (2-i)*4);
+			cu->cc.can_id |= tmp << (2 - i) * 4;
 		}
 
-	} else if (cs[8] == CANID_DELIM) { /* 8 digits */
+	} else if (cs[5] == CANID_DELIM) { /* 5 digits CAN XL VCID/PRIO*/
+
+		idx = 6;
+		for (i = 0; i < 5; i++) {
+			if ((tmp = asc2nibble(cs[i])) > 0x0F)
+				return 0;
+			cu->xl.prio |= tmp << (4 - i) * 4;
+		}
+
+		/* the VCID starts at bit position 16 */
+		tmp = (cu->xl.prio << 4) & CANXL_VCID_MASK;
+		cu->xl.prio &= CANXL_PRIO_MASK;
+		cu->xl.prio |= tmp;
+
+	} else if (cs[8] == CANID_DELIM) { /* 8 digits EFF */
 
 		idx = 9;
-		for (i=0; i<8; i++){
+		for (i = 0; i < 8; i++) {
 			if ((tmp = asc2nibble(cs[i])) > 0x0F)
 				return 0;
-			cf->can_id |= (tmp << (7-i)*4);
+			cu->cc.can_id |= tmp << (7 - i) * 4;
 		}
-		if (!(cf->can_id & CAN_ERR_FLAG)) /* 8 digits but no errorframe?  */
-			cf->can_id |= CAN_EFF_FLAG;   /* then it is an extended frame */
+		if (!(cu->cc.can_id & CAN_ERR_FLAG)) /* 8 digits but no errorframe?  */
+			cu->cc.can_id |= CAN_EFF_FLAG;   /* then it is an extended frame */
 
 	} else
 		return 0;
 
-	if((cs[idx] == 'R') || (cs[idx] == 'r')){ /* RTR frame */
-		cf->can_id |= CAN_RTR_FLAG;
+	if ((cs[idx] == 'R') || (cs[idx] == 'r')) { /* RTR frame */
+		cu->cc.can_id |= CAN_RTR_FLAG;
 
 		/* check for optional DLC value for CAN 2.0B frames */
-		if(cs[++idx] && (tmp = asc2nibble(cs[idx])) <= CAN_MAX_DLC)
-			cf->len = tmp;
+		if (cs[++idx] && (tmp = asc2nibble(cs[idx++])) <= CAN_MAX_DLEN) {
+			cu->cc.len = tmp;
 
-		return ret;
+			/* check for optional raw DLC value for CAN 2.0B frames */
+			if ((tmp == CAN_MAX_DLEN) && (cs[idx++] == CC_DLC_DELIM)) {
+				tmp = asc2nibble(cs[idx]);
+				if ((tmp > CAN_MAX_DLEN) && (tmp <= CAN_MAX_RAW_DLC))
+					cu->cc.len8_dlc = tmp;
+			}
+		}
+		return mtu;
 	}
 
 	if (cs[idx] == CANID_DELIM) { /* CAN FD frame escape char '##' */
-
 		maxdlen = CANFD_MAX_DLEN;
-		ret = CANFD_MTU;
+		mtu = CANFD_MTU;
 
 		/* CAN FD frame <canid>##<flags><data>* */
-		if ((tmp = asc2nibble(cs[idx+1])) > 0x0F)
+		if ((tmp = asc2nibble(cs[idx + 1])) > 0x0F)
 			return 0;
 
-		cf->flags = tmp;
+		cu->fd.flags = tmp;
+		cu->fd.flags |= CANFD_FDF; /* dual-use */
 		idx += 2;
+
+	} else if (cs[idx + 14] == CANID_DELIM) { /* CAN XL frame '#80:00:11223344#' */
+		maxdlen = CANXL_MAX_DLEN;
+		mtu = CANXL_MTU;
+		data = cu->xl.data; /* fill CAN XL data */
+
+		if ((cs[idx + 2] != XL_HDR_DELIM) || (cs[idx + 5] != XL_HDR_DELIM))
+			return 0;
+
+		if ((tmp = asc2nibble(cs[idx++])) > 0x0F)
+			return 0;
+		cu->xl.flags = tmp << 4;
+		if ((tmp = asc2nibble(cs[idx++])) > 0x0F)
+			return 0;
+		cu->xl.flags |= tmp;
+
+		/* force CAN XL flag if it was missing in the ASCII string */
+		cu->xl.flags |= CANXL_XLF;
+
+		idx++; /* skip XL_HDR_DELIM */
+
+		if ((tmp = asc2nibble(cs[idx++])) > 0x0F)
+			return 0;
+		cu->xl.sdt = tmp << 4;
+		if ((tmp = asc2nibble(cs[idx++])) > 0x0F)
+			return 0;
+		cu->xl.sdt |= tmp;
+
+		idx++; /* skip XL_HDR_DELIM */
+
+		for (i = 0; i < 8; i++) {
+			if ((tmp = asc2nibble(cs[idx++])) > 0x0F)
+				return 0;
+			cu->xl.af |= tmp << (7 - i) * 4;
+		}
+
+		idx++; /* skip CANID_DELIM */
 	}
 
-	for (i=0, dlen=0; i < maxdlen; i++){
-
-		if(cs[idx] == DATA_SEPARATOR) /* skip (optional) separator */
+	for (i = 0, dlen = 0; i < maxdlen; i++) {
+		if (cs[idx] == DATA_SEPERATOR) /* skip (optional) separator */
 			idx++;
 
-		if(idx >= len) /* end of string => end of data */
+		if (idx >= len) /* end of string => end of data */
 			break;
 
 		if ((tmp = asc2nibble(cs[idx++])) > 0x0F)
 			return 0;
-		cf->data[i] = (tmp << 4);
+		data[i] = tmp << 4;
 		if ((tmp = asc2nibble(cs[idx++])) > 0x0F)
 			return 0;
-		cf->data[i] |= tmp;
+		data[i] |= tmp;
 		dlen++;
 	}
-	cf->len = dlen;
 
-	return ret;
+	if (mtu == CANXL_MTU)
+		cu->xl.len = dlen;
+	else
+		cu->fd.len = dlen;
+
+	/* check for extra DLC when having a Classic CAN with 8 bytes payload */
+	if ((maxdlen == CAN_MAX_DLEN) && (dlen == CAN_MAX_DLEN) && (cs[idx++] == CC_DLC_DELIM)) {
+		unsigned char dlc = asc2nibble(cs[idx]);
+
+		if ((dlc > CAN_MAX_DLEN) && (dlc <= CAN_MAX_RAW_DLC))
+			cu->cc.len8_dlc = dlc;
+	}
+
+	return mtu;
 }
 
-void fprint_canframe(FILE *stream , struct canfd_frame *cf, char *eol, int sep, int maxdlen) {
+int snprintf_canframe(char *buf, size_t size, cu_t *cu, int sep)
+{
 	/* documentation see lib.h */
 
-	char buf[CL_CFSZ]; /* max length */
+	unsigned char is_canfd = cu->fd.flags;
+	int i, offset;
+	int len;
 
-	sprint_canframe(buf, cf, sep, maxdlen);
-	fprintf(stream, "%s", buf);
-	if (eol)
-		fprintf(stream, "%s", eol);
-}
+	/* ensure space for string termination */
+	if (size < 1)
+		return size;
 
-void sprint_canframe(char *buf , struct canfd_frame *cf, int sep, int maxdlen) {
-	/* documentation see lib.h */
+	/* handle CAN XL frames */
+	if (cu->xl.flags & CANXL_XLF) {
+		len = cu->xl.len;
 
-	int i,offset;
-	int len = (cf->len > maxdlen) ? maxdlen : cf->len;
+		/* check if the CAN frame fits into the provided buffer */
+		if (sizeof("00123#11:22:12345678#") + 2 * len + (sep ? len : 0) > size - 1) {
+			/* mark buffer overflow in output */
+			memset(buf, '-', size - 1);
+			buf[size - 1] = 0;
+			return size;
+		}
 
-	if (cf->can_id & CAN_ERR_FLAG) {
-		put_eff_id(buf, cf->can_id & (CAN_ERR_MASK|CAN_ERR_FLAG));
+		/* print prio and CAN XL header content */
+		offset = sprintf(buf, "%02lx%03lx#%02X:%02X:%08lx#",
+				 (canid_t)(cu->xl.prio & CANXL_VCID_MASK) >> CANXL_VCID_OFFSET,
+				 (canid_t)(cu->xl.prio & CANXL_PRIO_MASK),
+				 cu->xl.flags, cu->xl.sdt, cu->xl.af);
+
+		/* data */
+		for (i = 0; i < len; i++) {
+			put_hex_byte(buf + offset, cu->xl.data[i]);
+			offset += 2;
+			if (sep && (i + 1 < len))
+				buf[offset++] = '.';
+		}
+
+		buf[offset] = 0;
+
+		return offset;
+	}
+
+	/* handle CAN CC/FD frames - ensure max length values */
+	if (is_canfd)
+		len = (cu->fd.len > CANFD_MAX_DLEN) ? CANFD_MAX_DLEN : cu->fd.len;
+	else
+		len = (cu->fd.len > CAN_MAX_DLEN) ? CAN_MAX_DLEN : cu->fd.len;
+
+	/* check if the CAN frame fits into the provided buffer */
+	if (sizeof("12345678#_F") + 2 * len + (sep ? len : 0) +	\
+	    (cu->fd.can_id & CAN_RTR_FLAG ? 2 : 0) > size - 1) {
+		/* mark buffer overflow in output */
+		memset(buf, '-', size - 1);
+		buf[size - 1] = 0;
+		return size;
+	}
+
+	if (cu->fd.can_id & CAN_ERR_FLAG) {
+		put_eff_id(buf, cu->fd.can_id & (CAN_ERR_MASK | CAN_ERR_FLAG));
 		buf[8] = '#';
 		offset = 9;
-	} else if (cf->can_id & CAN_EFF_FLAG) {
-		put_eff_id(buf, cf->can_id & CAN_EFF_MASK);
+	} else if (cu->fd.can_id & CAN_EFF_FLAG) {
+		put_eff_id(buf, cu->fd.can_id & CAN_EFF_MASK);
 		buf[8] = '#';
 		offset = 9;
 	} else {
-		put_sff_id(buf, cf->can_id & CAN_SFF_MASK);
+		put_sff_id(buf, cu->fd.can_id & CAN_SFF_MASK);
 		buf[3] = '#';
 		offset = 4;
 	}
 
-	/* standard CAN frames may have RTR enabled. There are no ERR frames with RTR */
-	if (maxdlen == CAN_MAX_DLEN && cf->can_id & CAN_RTR_FLAG) {
+	/* CAN CC frames may have RTR enabled. There are no ERR frames with RTR */
+	if (!is_canfd && cu->fd.can_id & CAN_RTR_FLAG) {
 		buf[offset++] = 'R';
 		/* print a given CAN 2.0B DLC if it's not zero */
-		if (cf->len && cf->len <= CAN_MAX_DLC)
-			buf[offset++] = hex_asc_upper_lo(cf->len);
+		if (len && len <= CAN_MAX_DLEN) {
+			buf[offset++] = hex_asc_upper_lo(cu->fd.len);
+
+			/* check for optional raw DLC value for CAN 2.0B frames */
+			if (len == CAN_MAX_DLEN) {
+				if ((cu->cc.len8_dlc > CAN_MAX_DLEN) && (cu->cc.len8_dlc <= CAN_MAX_RAW_DLC)) {
+					buf[offset++] = CC_DLC_DELIM;
+					buf[offset++] = hex_asc_upper_lo(cu->cc.len8_dlc);
+				}
+			}
+		}
 
 		buf[offset] = 0;
-		return;
+		return offset;
 	}
 
-	if (maxdlen == CANFD_MAX_DLEN) {
+	/* any CAN FD flags */
+	if (is_canfd) {
 		/* add CAN FD specific escape char and flags */
 		buf[offset++] = '#';
-		buf[offset++] = hex_asc_upper_lo(cf->flags);
+		buf[offset++] = hex_asc_upper_lo(cu->fd.flags);
 		if (sep && len)
 			buf[offset++] = '.';
 	}
 
+	/* data */
 	for (i = 0; i < len; i++) {
-		put_hex_byte(buf + offset, cf->data[i]);
+		put_hex_byte(buf + offset, cu->fd.data[i]);
 		offset += 2;
-		if (sep && (i+1 < len))
+		if (sep && (i + 1 < len))
 			buf[offset++] = '.';
 	}
 
-	buf[offset] = 0;
-}
+	/* check for extra DLC when having a Classic CAN with 8 bytes payload */
+	if (!is_canfd && (len == CAN_MAX_DLEN)) {
+		unsigned char dlc = cu->cc.len8_dlc;
 
-void fprint_long_canframe(FILE *stream , struct canfd_frame *cf, char *eol, int view, int maxdlen) {
-	/* documentation see lib.h */
-
-	char buf[CL_LONGCFSZ];
-
-	sprint_long_canframe(buf, cf, view, maxdlen);
-	fprintf(stream, "%s", buf);
-	if ((view & CANLIB_VIEW_ERROR) && (cf->can_id & CAN_ERR_FLAG)) {
-		snprintf_can_error_frame(buf, sizeof(buf), cf, "\n\t");
-		fprintf(stream, "\n\t%s", buf);
+		if ((dlc > CAN_MAX_DLEN) && (dlc <= CAN_MAX_RAW_DLC)) {
+			buf[offset++] = CC_DLC_DELIM;
+			buf[offset++] = hex_asc_upper_lo(dlc);
+		}
 	}
-	if (eol)
-		fprintf(stream, "%s", eol);
+
+	buf[offset] = 0;
+
+	return offset;
 }
 
-void sprint_long_canframe(char *buf , struct canfd_frame *cf, int view, int maxdlen) {
+int snprintf_long_canframe(char *buf, size_t size, cu_t *cu, int view)
+{
 	/* documentation see lib.h */
 
+	unsigned char is_canfd = cu->fd.flags;
 	int i, j, dlen, offset;
-	int len = (cf->len > maxdlen)? maxdlen : cf->len;
+	size_t maxsize;
+	int len;
+
+	/* ensure space for string termination */
+	if (size < 1)
+		return size;
+
+	/* handle CAN XL frames */
+	if (cu->xl.flags & CANXL_XLF) {
+		len = cu->xl.len;
+
+		/* crop to CANFD_MAX_DLEN */
+		if (len > CANFD_MAX_DLEN)
+			dlen = CANFD_MAX_DLEN;
+		else
+			dlen = len;
+
+		/* check if the CAN frame fits into the provided buffer */
+		if (sizeof(".....123 [2048] (00|11:22:12345678)  ...") + 3 * dlen > size - 1) {
+			/* mark buffer overflow in output */
+			memset(buf, '-', size - 1);
+			buf[size - 1] = 0;
+			return size;
+		}
+
+		if (view & CANLIB_VIEW_INDENT_SFF) {
+			memset(buf, ' ', 5);
+			put_sff_id(buf + 5, cu->xl.prio & CANXL_PRIO_MASK);
+			offset = 8;
+		} else {
+			put_sff_id(buf, cu->xl.prio & CANXL_PRIO_MASK);
+			offset = 3;
+		}
+
+		/* print prio and CAN XL header content */
+		offset += sprintf(buf + offset, " [%04d] (%02lx|%02X:%02X:%08lx) ",
+				  len,
+				  (canid_t)(cu->xl.prio & CANXL_VCID_MASK) >> CANXL_VCID_OFFSET,
+				  cu->xl.flags, cu->xl.sdt, cu->xl.af);
+
+		for (i = 0; i < dlen; i++) {
+			put_hex_byte(buf + offset, cu->xl.data[i]);
+			offset += 2;
+			if (i + 1 < dlen)
+				buf[offset++] = ' ';
+		}
+
+		/* indicate cropped output */
+		if (cu->xl.len > dlen)
+			offset += sprintf(buf + offset, " ...");
+
+		buf[offset] = 0;
+
+		return offset;
+	}
+
+	/* ensure max length values */
+	if (is_canfd)
+		len = (cu->fd.len > CANFD_MAX_DLEN) ? CANFD_MAX_DLEN : cu->fd.len;
+	else
+		len = (cu->fd.len > CAN_MAX_DLEN) ? CAN_MAX_DLEN : cu->fd.len;
+
+	/* check if the CAN frame fits into the provided buffer */
+	maxsize = sizeof("12345678  [12]  ");
+	if (view & CANLIB_VIEW_BINARY)
+		dlen = 9; /* _10101010 */
+	else
+		dlen = 3; /* _AA */
+
+	if (cu->fd.can_id & CAN_RTR_FLAG) {
+		maxsize += sizeof("    remote request");
+	} else {
+		maxsize += len * dlen;
+
+		if (len <= CAN_MAX_DLEN) {
+			if (cu->fd.can_id & CAN_ERR_FLAG) {
+				maxsize += sizeof("    ERRORFRAME");
+				maxsize += (8 - len) * dlen;
+			} else if (view & CANLIB_VIEW_ASCII) {
+				maxsize += sizeof("    'a.b.CDEF'");
+				maxsize += (8 - len) * dlen;
+			}
+		}
+	}
+
+	if (maxsize > size - 1) {
+		/* mark buffer overflow in output */
+		memset(buf, '-', size - 1);
+		buf[size - 1] = 0;
+		return size;
+	}
 
 	/* initialize space for CAN-ID and length information */
 	memset(buf, ' ', 15);
 
-	if (cf->can_id & CAN_ERR_FLAG) {
-		put_eff_id(buf, cf->can_id & (CAN_ERR_MASK|CAN_ERR_FLAG));
+	if (cu->cc.can_id & CAN_ERR_FLAG) {
+		put_eff_id(buf, cu->cc.can_id & (CAN_ERR_MASK | CAN_ERR_FLAG));
 		offset = 10;
-	} else if (cf->can_id & CAN_EFF_FLAG) {
-		put_eff_id(buf, cf->can_id & CAN_EFF_MASK);
+	} else if (cu->fd.can_id & CAN_EFF_FLAG) {
+		put_eff_id(buf, cu->fd.can_id & CAN_EFF_MASK);
 		offset = 10;
 	} else {
 		if (view & CANLIB_VIEW_INDENT_SFF) {
-			put_sff_id(buf + 5, cf->can_id & CAN_SFF_MASK);
+			put_sff_id(buf + 5, cu->fd.can_id & CAN_SFF_MASK);
 			offset = 10;
 		} else {
-			put_sff_id(buf, cf->can_id & CAN_SFF_MASK);
+			put_sff_id(buf, cu->fd.can_id & CAN_SFF_MASK);
 			offset = 5;
 		}
 	}
 
-	/* The len value is sanitized by maxdlen (see above) */
-	if (maxdlen == CAN_MAX_DLEN) {
-		buf[offset + 1] = '[';
-		buf[offset + 2] = len + '0';
-		buf[offset + 3] = ']';
+	/* The len value is sanitized (see above) */
+	if (!is_canfd) {
+		if (view & CANLIB_VIEW_LEN8_DLC) {
+			unsigned char dlc = cu->cc.len8_dlc;
+
+			/* fall back to len if we don't have a valid DLC > 8 */
+			if (!((len == CAN_MAX_DLEN) && (dlc > CAN_MAX_DLEN) &&
+			      (dlc <= CAN_MAX_RAW_DLC)))
+				dlc = len;
+
+			buf[offset + 1] = '{';
+			buf[offset + 2] = hex_asc_upper[dlc];
+			buf[offset + 3] = '}';
+		} else {
+			buf[offset + 1] = '[';
+			buf[offset + 2] = len + '0';
+			buf[offset + 3] = ']';
+		}
 
 		/* standard CAN frames may have RTR enabled */
-		if (cf->can_id & CAN_RTR_FLAG) {
-			sprintf(buf+offset+5, " remote request");
-			return;
+		if (cu->fd.can_id & CAN_RTR_FLAG) {
+			offset += sprintf(buf + offset + 5, " remote request");
+			return offset + 5;
 		}
 	} else {
 		buf[offset] = '[';
-		buf[offset + 1] = (len/10) + '0';
-		buf[offset + 2] = (len%10) + '0';
+		buf[offset + 1] = (len / 10) + '0';
+		buf[offset + 2] = (len % 10) + '0';
 		buf[offset + 3] = ']';
 	}
 	offset += 5;
 
 	if (view & CANLIB_VIEW_BINARY) {
-		dlen = 9; /* _10101010 */
+		/* _10101010 - dlen = 9, see above */
 		if (view & CANLIB_VIEW_SWAP) {
 			for (i = len - 1; i >= 0; i--) {
-				buf[offset++] = (i == len-1)?' ':SWAP_DELIMITER;
+				buf[offset++] = (i == len - 1) ? ' ' : SWAP_DELIMITER;
 				for (j = 7; j >= 0; j--)
-					buf[offset++] = (1<<j & cf->data[i])?'1':'0';
+					buf[offset++] = (1 << j & cu->fd.data[i]) ? '1' : '0';
 			}
 		} else {
 			for (i = 0; i < len; i++) {
 				buf[offset++] = ' ';
 				for (j = 7; j >= 0; j--)
-					buf[offset++] = (1<<j & cf->data[i])?'1':'0';
+					buf[offset++] = (1 << j & cu->fd.data[i]) ? '1' : '0';
 			}
 		}
 	} else {
-		dlen = 3; /* _AA */
+		/* _AA - dlen = 3, see above */
 		if (view & CANLIB_VIEW_SWAP) {
 			for (i = len - 1; i >= 0; i--) {
-				if (i == len-1)
+				if (i == len - 1)
 					buf[offset++] = ' ';
 				else
 					buf[offset++] = SWAP_DELIMITER;
 
-				put_hex_byte(buf + offset, cf->data[i]);
+				put_hex_byte(buf + offset, cu->fd.data[i]);
 				offset += 2;
 			}
 		} else {
 			for (i = 0; i < len; i++) {
 				buf[offset++] = ' ';
-				put_hex_byte(buf + offset, cf->data[i]);
+				put_hex_byte(buf + offset, cu->fd.data[i]);
 				offset += 2;
 			}
 		}
@@ -396,34 +626,36 @@ void sprint_long_canframe(char *buf , struct canfd_frame *cf, int view, int maxd
 	 * Does it make sense to write 64 ASCII byte behind 64 ASCII HEX data on the console?
 	 */
 	if (len > CAN_MAX_DLEN)
-		return;
+		return offset;
 
-	if (cf->can_id & CAN_ERR_FLAG)
-		sprintf(buf+offset, "%*s", dlen*(8-len)+13, "ERRORFRAME");
+	if (cu->fd.can_id & CAN_ERR_FLAG)
+		offset += sprintf(buf + offset, "%*s", dlen * (8 - len) + 13, "ERRORFRAME");
 	else if (view & CANLIB_VIEW_ASCII) {
-		j = dlen*(8-len)+4;
+		j = dlen * (8 - len) + 4;
 		if (view & CANLIB_VIEW_SWAP) {
-			sprintf(buf+offset, "%*s", j, "`");
+			sprintf(buf + offset, "%*s", j, "`");
 			offset += j;
 			for (i = len - 1; i >= 0; i--)
-				if ((cf->data[i] > 0x1F) && (cf->data[i] < 0x7F))
-					buf[offset++] = cf->data[i];
+				if ((cu->fd.data[i] > 0x1F) && (cu->fd.data[i] < 0x7F))
+					buf[offset++] = cu->fd.data[i];
 				else
 					buf[offset++] = '.';
 
-			sprintf(buf+offset, "`");
+			offset += sprintf(buf + offset, "`");
 		} else {
-			sprintf(buf+offset, "%*s", j, "'");
+			sprintf(buf + offset, "%*s", j, "'");
 			offset += j;
 			for (i = 0; i < len; i++)
-				if ((cf->data[i] > 0x1F) && (cf->data[i] < 0x7F))
-					buf[offset++] = cf->data[i];
+				if ((cu->fd.data[i] > 0x1F) && (cu->fd.data[i] < 0x7F))
+					buf[offset++] = cu->fd.data[i];
 				else
 					buf[offset++] = '.';
 
-			sprintf(buf+offset, "'");
+			offset += sprintf(buf + offset, "'");
 		}
 	}
+
+	return offset;
 }
 
 static const char *error_classes[] = {
@@ -436,6 +668,7 @@ static const char *error_classes[] = {
 	"bus-off",
 	"bus-error",
 	"restarted-after-bus-off",
+	"error-counter-tx-rx",
 };
 
 static const char *controller_problems[] = {
@@ -494,6 +727,10 @@ static const char *protocol_violation_locations[] = {
 	"unspecified",
 };
 
+#ifndef ARRAY_SIZE
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
+#endif
+
 static int snprintf_error_data(char *buf, size_t len, uint8_t err,
 			       const char **arr, int arr_len)
 {
@@ -504,9 +741,20 @@ static int snprintf_error_data(char *buf, size_t len, uint8_t err,
 
 	for (i = 0; i < arr_len; i++) {
 		if (err & (1 << i)) {
-			if (count)
-				n += snprintf(buf + n, len - n, ",");
-			n += snprintf(buf + n, len - n, "%s", arr[i]);
+			int tmp_n = 0;
+			if (count) {
+				/* Fix for potential buffer overflow https://lgtm.com/rules/1505913226124/ */
+				tmp_n = snprintf(buf + n, len - n, ",");
+				if (tmp_n < 0 || (size_t)tmp_n >= len - n) {
+					return n;
+				}
+				n += tmp_n;
+			}
+			tmp_n = snprintf(buf + n, len - n, "%s", arr[i]);
+			if (tmp_n < 0 || (size_t)tmp_n >= len - n) {
+				return n;
+			}
+			n += tmp_n;
 			count++;
 		}
 	}
@@ -531,7 +779,7 @@ static int snprintf_error_ctrl(char *buf, size_t len, const struct canfd_frame *
 	n += snprintf(buf + n, len - n, "{");
 	n += snprintf_error_data(buf + n, len - n, cf->data[1],
 				controller_problems,
-				nitems(controller_problems));
+				ARRAY_SIZE(controller_problems));
 	n += snprintf(buf + n, len - n, "}");
 
 	return n;
@@ -547,10 +795,10 @@ static int snprintf_error_prot(char *buf, size_t len, const struct canfd_frame *
 	n += snprintf(buf + n, len - n, "{{");
 	n += snprintf_error_data(buf + n, len - n, cf->data[2],
 				protocol_violation_types,
-				nitems(protocol_violation_types));
+				ARRAY_SIZE(protocol_violation_types));
 	n += snprintf(buf + n, len - n, "}{");
 	if (cf->data[3] > 0 &&
-	    cf->data[3] < nitems(protocol_violation_locations))
+	    cf->data[3] < ARRAY_SIZE(protocol_violation_locations))
 		n += snprintf(buf + n, len - n, "%s",
 			      protocol_violation_locations[cf->data[3]]);
 	n += snprintf(buf + n, len - n, "}}");
@@ -558,7 +806,20 @@ static int snprintf_error_prot(char *buf, size_t len, const struct canfd_frame *
 	return n;
 }
 
-void snprintf_can_error_frame(char *buf, size_t len, const struct canfd_frame *cf,
+static int snprintf_error_cnt(char *buf, size_t len, const struct canfd_frame *cf)
+{
+	int n = 0;
+
+	if (len <= 0)
+		return 0;
+
+	n += snprintf(buf + n, len - n, "{{%d}{%d}}",
+		      cf->data[6], cf->data[7]);
+
+	return n;
+}
+
+int snprintf_can_error_frame(char *buf, size_t len, const struct canfd_frame *cf,
                   const char* sep)
 {
 	canid_t class, mask;
@@ -566,23 +827,36 @@ void snprintf_can_error_frame(char *buf, size_t len, const struct canfd_frame *c
 	char *defsep = ",";
 
 	if (!(cf->can_id & CAN_ERR_FLAG))
-		return;
+		return 0;
 
 	class = cf->can_id & CAN_EFF_MASK;
-	if (class > (1 << nitems(error_classes))) {
-		fprintf(stderr, "Error class %#jx is invalid\n", (uintmax_t)class);
-		return;
+	if (class > (1 << ARRAY_SIZE(error_classes))) {
+		fprintf(stderr, "Error class %#lx is invalid\n", class);
+		return 0;
 	}
 
 	if (!sep)
 		sep = defsep;
 
-	for (i = 0; i < (int)nitems(error_classes); i++) {
+	for (i = 0; i < (int)ARRAY_SIZE(error_classes); i++) {
 		mask = 1 << i;
 		if (class & mask) {
-			if (classes)
-				n += snprintf(buf + n, len - n, "%s", sep);
- 			n += snprintf(buf + n, len - n, "%s", error_classes[i]);
+			int tmp_n = 0;
+			if (classes) {
+				/* Fix for potential buffer overflow https://lgtm.com/rules/1505913226124/ */
+				tmp_n = snprintf(buf + n, len - n, "%s", sep);
+				if (tmp_n < 0 || (size_t)tmp_n >= len - n) {
+					buf[0] = 0; /* empty terminated string */
+					return 0;
+				}
+				n += tmp_n;
+			}
+			tmp_n = snprintf(buf + n, len - n, "%s", error_classes[i]);
+			if (tmp_n < 0 || (size_t)tmp_n >= len - n) {
+				buf[0] = 0; /* empty terminated string */
+				return 0;
+			}
+			n += tmp_n;
 			if (mask == CAN_ERR_LOSTARB)
 				n += snprintf_error_lostarb(buf + n, len - n,
 							   cf);
@@ -590,13 +864,34 @@ void snprintf_can_error_frame(char *buf, size_t len, const struct canfd_frame *c
 				n += snprintf_error_ctrl(buf + n, len - n, cf);
 			if (mask == CAN_ERR_PROT)
 				n += snprintf_error_prot(buf + n, len - n, cf);
+			if (mask == CAN_ERR_CNT)
+				n += snprintf_error_cnt(buf + n, len - n, cf);
 			classes++;
 		}
 	}
 
-	if (cf->data[6] || cf->data[7]) {
-		n += snprintf(buf + n, len - n, "%s", sep);
-		n += snprintf(buf + n, len - n, "error-counter-tx-rx{{%d}{%d}}",
-			      cf->data[6], cf->data[7]);
+	if (!(cf->can_id & CAN_ERR_CNT) && (cf->data[6] || cf->data[7])) {
+		n += snprintf(buf + n, len - n, "%serror-counter-tx-rx", sep);
+		n += snprintf_error_cnt(buf + n, len - n, cf);
 	}
+
+	return n;
+}
+
+int64_t timespec_diff_ms(struct timespec *ts1,
+					  struct timespec *ts2)
+{
+	int64_t diff = (ts1->tv_sec - ts2->tv_sec) * 1000;
+
+	diff += (ts1->tv_nsec - ts2->tv_nsec) / 1000000;
+
+	return diff;
+}
+
+void timespec_add_ms(struct timespec *ts, uint64_t milliseconds)
+{
+	uint64_t total_ns = ts->tv_nsec + (milliseconds * 1000000);
+
+	ts->tv_sec += total_ns / 1000000000;
+	ts->tv_nsec = total_ns % 1000000000;
 }
