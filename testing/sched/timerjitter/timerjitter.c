@@ -192,7 +192,7 @@ static FAR void *timerjitter(FAR void *arg)
       diff = calc_diff(&now, &next);
       if (param->print)
         {
-          printf("diff %lu, now %lu.%lu\n", diff, now.tv_sec, now.tv_nsec);
+          printf("diff %llu, now %llu.%lu\n", diff, now.tv_sec, now.tv_nsec);
         }
 
       if (diff > param->max)
